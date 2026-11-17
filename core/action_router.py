@@ -30,7 +30,8 @@ def route_command(
         pending = ActionResult(
             status="needs_confirmation",
             message=f"Delete note {note_id}: {preview}",
-            data={"note_id": note_id, "preview": preview},
+            # Internal callback metadata; display only the preview in the UI.
+            data={"note_id": note_id, "preview": preview, "original_content": content},
         )
         if confirm_action is None:
             return pending

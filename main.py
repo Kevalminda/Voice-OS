@@ -6,6 +6,7 @@ import sys
 from dotenv import load_dotenv
 
 from core.command_processor import process_text_command as process_text_command
+from core.confirmation import ConfirmationOutcome, ConfirmationSession
 from core.dialogue import DialogueSession
 from core.schemas import ActionResult
 from storage.database import initialize_database
@@ -19,8 +20,30 @@ def _configure_voice_output():
 
 
 def confirm_deletion(pending: ActionResult) -> bool:
-    print(f"VoiceOS: {pending.message}")
-    return input("Confirm deletion (yes/no): ").strip().lower() in {"yes", "y"}
+    confirmation = ConfirmationSession()
+    try:
+        token = confirmation.begin(pending)
+        print(f"VoiceOS: {pending.message}")
+        while confirmation.has_pending:
+            reply = input(f"Approve with yes {token}; or no/cancel/edit: ")
+            result = confirmation.respond(reply, pending)
+            if result.outcome is ConfirmationOutcome.INVALID and confirmation.has_pending:
+                print(
+                    "VoiceOS: Confirmation invalid. Use an approval word and the exact token; "
+                    f"{confirmation.remaining_retries} attempt(s) remain."
+                )
+                continue
+            if result.edit_requested:
+                print(
+                    "VoiceOS: Deletion cancelled. Submit a corrected command separately; "
+                    "it will require a fresh confirmation."
+                )
+            else:
+                print(f"VoiceOS: Confirmation {result.outcome.value}.")
+            return result.outcome is ConfirmationOutcome.APPROVED
+        return False
+    finally:
+        confirmation.cancel()
 
 
 def _voice_text(stt):

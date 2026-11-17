@@ -7,6 +7,7 @@ import pytest
 import main
 from actions.notes import get_note
 from audio import AudioConfig
+from core.confirmation import ConfirmationSession
 from core.schemas import CommandRequest
 
 
@@ -36,7 +37,9 @@ def inputs(monkeypatch, answers):
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
 
 
-@pytest.mark.parametrize("approval,deleted", [("yes", True), ("no", False)])
+@pytest.mark.parametrize("approval,deleted", [
+    ("yes A7K2", True), ("हाँ A7K2", True), ("haan A7K2", True), ("no", False),
+])
 def test_voice_deletion_uses_existing_confirmation(
     monkeypatch, voice, existing_note, approval, deleted
 ):
@@ -48,6 +51,9 @@ def test_voice_deletion_uses_existing_confirmation(
         )
     )
     monkeypatch.setattr("core.command_processor.understand_command", nlu)
+    monkeypatch.setattr(main, "ConfirmationSession", lambda: ConfirmationSession(
+        token_factory=lambda: "A7K2",
+    ))
     inputs(monkeypatch, ["", "yes", approval, "exit"])
     main.main(["--voice"])
     nlu.assert_called_once_with(voice["normalized_text"])

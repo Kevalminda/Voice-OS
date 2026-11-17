@@ -75,7 +75,9 @@ def test_nonexistent_does_not_confirm():
 def test_router_requires_confirmation(existing_note):
     result = route_command(delete_command(existing_note))
     assert result.status == "needs_confirmation"
-    assert result.data == {"note_id": existing_note, "preview": "Test note"}
+    assert result.data == {
+        "note_id": existing_note, "preview": "Test note", "original_content": "Test note",
+    }
     assert get_note(existing_note).status == "success"
 
 
@@ -341,5 +343,7 @@ def test_multilingual_deletion_requires_explicit_approval(
         assert get_note(existing_note).data["content"] == "Test note"
     if confirm is not None:
         confirm.assert_called_once()
-        assert confirm.call_args.args[0].data == {"note_id": existing_note, "preview": "Test note"}
+        assert confirm.call_args.args[0].data == {
+            "note_id": existing_note, "preview": "Test note", "original_content": "Test note",
+        }
     generate.assert_called_once()
