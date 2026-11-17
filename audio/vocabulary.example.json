@@ -1,0 +1,16 @@
+{
+  "vocabulary": {
+    "VoiceOS": ["Voice OS", "वॉइस ओएस", "वॉइसओएस"],
+    "Python": ["पाइथन", "पायथन"],
+    "Gemini": ["जेमिनी", "जेमिनाई"],
+    "DBMS": ["डीबीएमएस", "डी बी एम एस"],
+    "microphone": ["माइक्रोफोन", "माइक्रोफ़ोन"],
+    "application": ["एप्लिकेशन", "एप्लीकेशन"],
+    "Faster-Whisper": ["Faster Whisper", "fasterwhisper", "फास्टर व्हिस्पर"],
+    "Keval": ["केवल"],
+    "Minda": ["मिंडा", "मिन्दा"]
+  },
+  "ambiguous_terms": ["Keval", "Minda"],
+  "name_groups": [["Keval", "Minda"]],
+  "name_contexts": ["मेरा नाम", "नाम", "my name is", "I am"]
+}
