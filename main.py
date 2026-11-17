@@ -5,7 +5,8 @@ import sys
 
 from dotenv import load_dotenv
 
-from core.command_processor import process_text_command
+from core.command_processor import process_text_command as process_text_command
+from core.dialogue import DialogueSession
 from core.schemas import ActionResult
 from storage.database import initialize_database
 
@@ -130,6 +131,7 @@ def main(argv=()):
     # SDK/transport debug logs can contain request payloads; keep them quiet.
     for name in ("google", "httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
+    dialogue = None
     try:
         stt = None
         if args.voice or args.list_devices:
@@ -184,6 +186,7 @@ def main(argv=()):
             print("Speech-only mode: all application actions are disabled; no Gemini calls.")
         else:
             initialize_database()
+            dialogue = DialogueSession()
         print("Welcome to VoiceOS. Type 'exit' to close.")
         while True:
             text = _voice_text(stt) if stt is not None else input("You: ").strip()
@@ -191,7 +194,11 @@ def main(argv=()):
                 break
             if not text:
                 if stt is None:
-                    print("Please enter a command.")
+                    if dialogue is not None and dialogue.has_pending:
+                        result = dialogue.process_text_command("", confirm_action=confirm_deletion)
+                        print(f"VoiceOS: {result.message} [{result.status}]")
+                    else:
+                        print("Please enter a command.")
                 continue
             result = (
                 ActionResult(
@@ -199,7 +206,7 @@ def main(argv=()):
                     message="Application actions are disabled in speech-only mode.",
                 )
                 if args.speech_only
-                else process_text_command(text, confirm_action=confirm_deletion)
+                else dialogue.process_text_command(text, confirm_action=confirm_deletion)
             )
             print(f"VoiceOS: {result.message} [{result.status}]")
     except (EOFError, KeyboardInterrupt):
@@ -209,6 +216,8 @@ def main(argv=()):
             "Application stopped. Check local configuration and storage."
         )
     finally:
+        if dialogue is not None:
+            dialogue.cancel()
         print("VoiceOS shutting down.")
 
 

@@ -314,3 +314,36 @@ def test_reviewed_multilingual_voice_uses_real_command_pipeline(
     output = capsys.readouterr().out
     assert f"Heard: {text}" in output
     assert "Your note has been saved. [success]" in output
+
+
+def test_voice_clarification_uses_reviewed_followup_without_model_reload(
+    monkeypatch, voice, capsys,
+):
+    command_text = "Mere liye ek note banao"
+    content = "kal VoiceOS mein Python aur DBMS पढ़ना है"
+    turns = [{**voice, "raw_text": text, "normalized_text": text}
+             for text in (command_text, content)]
+    engine = SimpleNamespace(
+        config=AudioConfig(), execution_device="cuda", compute_type="float16",
+        load_model=MagicMock(return_value=0.1), load_vad=MagicMock(return_value=0.1),
+        listen_and_transcribe=MagicMock(side_effect=turns),
+    )
+    factory = MagicMock(return_value=engine)
+    monkeypatch.setattr("audio.SpeechToText", factory)
+    generate = MagicMock(return_value=json.dumps({
+        "intent": "create_note", "entities": {}, "language": "hinglish",
+        "confidence": 0.95, "missing_fields": ["content"],
+    }))
+    monkeypatch.setattr("nlu.service.generate_response", generate)
+    inputs(monkeypatch, ["", "yes", "", "yes", "exit"])
+
+    main.main(["--voice"])
+
+    assert get_note(1).data["content"] == content
+    generate.assert_called_once()
+    assert generate.call_args.args[0].split("User command:\n", 1)[1].strip() == command_text
+    factory.assert_called_once()
+    engine.load_model.assert_called_once()
+    engine.load_vad.assert_called_once()
+    assert engine.listen_and_transcribe.call_count == 2
+    assert "[needs_clarification]" in capsys.readouterr().out

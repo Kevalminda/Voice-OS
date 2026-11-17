@@ -8,13 +8,10 @@ from nlu.service import understand_command
 logger = logging.getLogger(__name__)
 
 
-def process_text_command(
-    user_text: str,
-    confirm_action: Callable[[ActionResult], bool] | None = None,
-) -> ActionResult:
+def _process_safely(operation: Callable[[], ActionResult]) -> ActionResult:
+    """Share the existing error boundary with contextual command processing."""
     try:
-        command = understand_command(user_text)
-        result = route_command(command, confirm_action=confirm_action)
+        result = operation()
         logger.debug("Command completed: %s", result.status)
         return result
     except ValueError:
@@ -24,6 +21,14 @@ def process_text_command(
     except Exception:
         logger.exception("Command processing failed.")
         return ActionResult(
-           status="error",
-           message="Unable to process your command. Please retry.")
-        return ActionResult(status="error", message="Unable to process your command. Please retry.")
+            status="error", message="Unable to process your command. Please retry."
+        )
+
+
+def process_text_command(
+    user_text: str,
+    confirm_action: Callable[[ActionResult], bool] | None = None,
+) -> ActionResult:
+    return _process_safely(
+        lambda: route_command(understand_command(user_text), confirm_action=confirm_action)
+    )
