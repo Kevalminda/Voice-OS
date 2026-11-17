@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from core.schemas import Intent, Language
 from nlu.parser import parse_nlu_response
 
@@ -60,3 +64,25 @@ def test_normalize_integer_entity_values():
 
     assert command.entities["note_id"] == "1"
     assert isinstance(command.entities["note_id"], str)
+
+
+@pytest.mark.parametrize("ensure_ascii", [False, True], ids=["unicode", "json-escapes"])
+@pytest.mark.parametrize(
+    "language,content",
+    [
+        (Language.ENGLISH, "Keval Minda uses VoiceOS, Python, Gemini and DBMS-12."),
+        (Language.HINDI, "केवल मिंडा आज VoiceOS में Python, Gemini और DBMS-12 पढ़ेगा।"),
+        (Language.HINGLISH, "kal VoiceOS mein Python aur Gemini ke saath DBMS-12 पढ़ना है"),
+    ],
+    ids=["english", "hindi", "hinglish"],
+)
+def test_content_preserves_language_script_and_identifiers(language, content, ensure_ascii):
+    response = json.dumps({
+        "intent": "create_note", "entities": {"content": content},
+        "language": language.value, "confidence": 0.95, "missing_fields": [],
+    }, ensure_ascii=ensure_ascii)
+
+    command = parse_nlu_response(response)
+
+    assert command.language == language
+    assert command.entities == {"content": content}

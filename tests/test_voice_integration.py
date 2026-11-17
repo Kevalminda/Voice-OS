@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -280,3 +281,36 @@ def test_microphone_error_allows_retry_without_model_reload(monkeypatch, voice, 
     assert engine.listen_and_transcribe.call_count == 2
     processor.assert_not_called()
     assert "Microphone unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "text,content,language",
+    [
+        ("Create a note saying buy milk", "buy milk", "english"),
+        ("मेरे लिए एक नोट बनाओ कि कल DBMS पढ़ना है", "कल DBMS पढ़ना है", "hindi"),
+        ("Mere liye ek note banao ki kal DBMS padhna hai", "kal DBMS padhna hai", "hinglish"),
+    ],
+    ids=["english", "hindi", "hinglish"],
+)
+def test_reviewed_multilingual_voice_uses_real_command_pipeline(
+    monkeypatch, voice, text, content, language, capsys,
+):
+    """STT and Gemini are mocked; parsing, validation, routing and storage are real."""
+    voice["raw_text"] = voice["normalized_text"] = text
+    generate = MagicMock(return_value=json.dumps({
+        "intent": "create_note", "entities": {"content": content}, "language": language,
+        "confidence": 0.95, "missing_fields": [],
+    }, ensure_ascii=False))
+    monkeypatch.setattr("nlu.service.generate_response", generate)
+    inputs(monkeypatch, ["", "yes", "exit"])
+
+    main.main(["--voice"])
+
+    generate.assert_called_once()
+    assert generate.call_args.args[0].split("User command:\n", 1)[1].strip() == text
+    assert get_note(1).data["content"] == content
+    assert voice["raw_text"] == text
+    assert voice["normalized_text"] == text
+    output = capsys.readouterr().out
+    assert f"Heard: {text}" in output
+    assert "Your note has been saved. [success]" in output
