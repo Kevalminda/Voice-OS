@@ -54,7 +54,7 @@ def test_voice_deletion_uses_existing_confirmation(
     monkeypatch.setattr(main, "ConfirmationSession", lambda: ConfirmationSession(
         token_factory=lambda: "A7K2",
     ))
-    inputs(monkeypatch, ["", "yes", approval, "exit"])
+    inputs(monkeypatch, ["", "yes", "keyboard", approval, "exit"])
     main.main(["--voice"])
     nlu.assert_called_once_with(voice["normalized_text"])
     assert (get_note(existing_note).status == "error") is deleted

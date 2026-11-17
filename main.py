@@ -20,13 +20,26 @@ def _configure_voice_output():
 
 
 def confirm_deletion(pending: ActionResult) -> bool:
+    return _confirm_deletion(pending)
+
+
+def _confirm_deletion(pending: ActionResult, response_reader=None) -> bool:
     confirmation = ConfirmationSession()
     try:
         token = confirmation.begin(pending)
         print(f"VoiceOS: {pending.message}")
         while confirmation.has_pending:
-            reply = input(f"Approve with yes {token}; or no/cancel/edit: ")
+            if confirmation.check_pending(pending) is not None:
+                return False
+            reply = (
+                input(f"Approve with yes {token}; or no/cancel/edit: ")
+                if response_reader is None else response_reader(confirmation, pending, token)
+            )
+            if reply is None:
+                return False
             result = confirmation.respond(reply, pending)
+            if result.outcome is ConfirmationOutcome.APPROVED:
+                return True
             if result.outcome is ConfirmationOutcome.INVALID and confirmation.has_pending:
                 print(
                     "VoiceOS: Confirmation invalid. Use an approval word and the exact token; "
@@ -40,7 +53,7 @@ def confirm_deletion(pending: ActionResult) -> bool:
                 )
             else:
                 print(f"VoiceOS: Confirmation {result.outcome.value}.")
-            return result.outcome is ConfirmationOutcome.APPROVED
+            return False
         return False
     finally:
         confirmation.cancel()
@@ -155,6 +168,7 @@ def main(argv=()):
     for name in ("google", "httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
     dialogue = None
+    confirmation_callback = confirm_deletion
     try:
         stt = None
         if args.voice or args.list_devices:
@@ -210,6 +224,13 @@ def main(argv=()):
         else:
             initialize_database()
             dialogue = DialogueSession()
+            if stt is not None:
+                from core.voice_confirmation import VoiceConfirmationReader
+
+                response_reader = VoiceConfirmationReader(stt)
+
+                def confirmation_callback(pending):
+                    return _confirm_deletion(pending, response_reader)
         print("Welcome to VoiceOS. Type 'exit' to close.")
         while True:
             text = _voice_text(stt) if stt is not None else input("You: ").strip()
@@ -218,7 +239,9 @@ def main(argv=()):
             if not text:
                 if stt is None:
                     if dialogue is not None and dialogue.has_pending:
-                        result = dialogue.process_text_command("", confirm_action=confirm_deletion)
+                        result = dialogue.process_text_command(
+                            "", confirm_action=confirmation_callback
+                        )
                         print(f"VoiceOS: {result.message} [{result.status}]")
                     else:
                         print("Please enter a command.")
@@ -229,7 +252,7 @@ def main(argv=()):
                     message="Application actions are disabled in speech-only mode.",
                 )
                 if args.speech_only
-                else dialogue.process_text_command(text, confirm_action=confirm_deletion)
+                else dialogue.process_text_command(text, confirm_action=confirmation_callback)
             )
             print(f"VoiceOS: {result.message} [{result.status}]")
     except (EOFError, KeyboardInterrupt):

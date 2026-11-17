@@ -109,7 +109,8 @@ class ConfirmationSession:
         self._pending = _PendingConfirmation(binding, token, expires_at)
         return token
 
-    def respond(self, response: str, pending: ActionResult) -> ConfirmationResult:
+    def check_pending(self, pending: ActionResult) -> ConfirmationResult | None:
+        """Check binding/expiry without spending an attempt or extending the deadline."""
         current = self._pending
         if current is None:
             return ConfirmationResult(ConfirmationOutcome.INVALID)
@@ -120,6 +121,13 @@ class ConfirmationSession:
                 return self._finish(ConfirmationResult(ConfirmationOutcome.INVALID))
         except (ValueError, TypeError):
             return self._finish(ConfirmationResult(ConfirmationOutcome.INVALID))
+        return None
+
+    def respond(self, response: str, pending: ActionResult) -> ConfirmationResult:
+        invalid = self.check_pending(pending)
+        if invalid is not None:
+            return invalid
+        current = self._pending
         result = self._parse_reply(response, current.token)
         if result.outcome is ConfirmationOutcome.INVALID:
             current.invalid_replies += 1
