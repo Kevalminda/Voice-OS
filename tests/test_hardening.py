@@ -1,4 +1,6 @@
 import json
+import logging
+import traceback
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -10,6 +12,7 @@ from actions.notes import get_note, update_note
 from core import action_router
 from core.action_router import route_command
 from core.command_processor import process_text_command
+from core.dialogue import DialogueSession
 from core.schemas import CommandRequest
 from nlu import llm_client
 from nlu.parser import parse_nlu_response
@@ -146,6 +149,77 @@ def test_permanent_failure_no_retry(fake_client, code, caplog):
         llm_client.generate_response("test")
     assert "SECRET_SENTINEL" not in str(caught.value) + caplog.text
     assert fake_client.models.generate_content.call_count == 1
+
+
+@pytest.mark.parametrize("entry_point", ["stateless", "dialogue"])
+@pytest.mark.parametrize("failure", ["api", "transport", "untrusted-code"])
+def test_provider_body_is_redacted_through_both_processors(
+    fake_client, caplog, entry_point, failure,
+):
+    marker = "SYNTHETIC_PRIVATE_PROVIDER_BODY_AND_CREDENTIAL"
+    if failure == "api":
+        error = errors.APIError(401, {"message": marker, "details": {"credential": marker}})
+        expected_attempts = 1
+    else:
+        error = httpx.ReadTimeout(marker)
+        expected_attempts = 3
+        if failure == "untrusted-code":
+            error.code = marker
+    fake_client.models.generate_content.side_effect = error
+    processor = process_text_command
+    if entry_point == "dialogue":
+        processor = DialogueSession().process_text_command
+
+    with caplog.at_level(logging.DEBUG):
+        result = processor("Create a note saying regression check")
+
+    assert result.status == "error"
+    assert result.message == "Unable to process your command. Please retry."
+    assert marker not in caplog.text + result.message
+    records = [record for record in caplog.records if record.name == "core.command_processor"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert "RuntimeError" in records[0].getMessage()
+    assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)
+    assert fake_client.models.generate_content.call_count == expected_attempts
+
+
+def test_sanitized_provider_failure_does_not_format_original_sdk_chain(fake_client, caplog):
+    marker = "SYNTHETIC_PROVIDER_CHAIN_BODY"
+    fake_client.models.generate_content.side_effect = errors.APIError(401, {"message": marker})
+
+    with pytest.raises(RuntimeError) as caught:
+        llm_client.generate_response("Create a note")
+
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert marker not in formatted + caplog.text
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
+@pytest.mark.parametrize("entry_point", ["stateless", "dialogue"])
+def test_unexpected_chained_error_logs_type_without_message(monkeypatch, caplog, entry_point):
+    marker = "SYNTHETIC_RAW_EXCEPTION_MESSAGE"
+
+    def fail(user_text):
+        try:
+            raise RuntimeError(marker)
+        except RuntimeError as error:
+            raise OSError(marker) from error
+
+    monkeypatch.setattr("core.command_processor.understand_command", fail)
+    processor = process_text_command
+    if entry_point == "dialogue":
+        processor = DialogueSession().process_text_command
+
+    with caplog.at_level(logging.ERROR):
+        result = processor("Show my notes")
+
+    assert result.status == "error"
+    assert result.message == "Unable to process your command. Please retry."
+    assert marker not in caplog.text
+    assert "OSError" in caplog.text
+    assert all(record.exc_info is None and record.stack_info is None for record in caplog.records)
 
 
 def test_retry_exhaustion(fake_client):

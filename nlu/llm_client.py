@@ -83,6 +83,8 @@ def generate_response(prompt: str) -> str:
             
             except (errors.APIError, httpx.TransportError) as error:
                 code = getattr(error, "code", None)
+                if type(code) is not int:
+                    code = None
 
                 retryable = (
                     isinstance(error, httpx.TransportError)
@@ -102,7 +104,7 @@ def generate_response(prompt: str) -> str:
                         f"Error type: {type(error).__name__}, "
                         f"HTTP code: {code}. "
                         "Check Gemini availability, quota and model configuration."
-                    ) from error
+                    ) from None
 
                 logger.warning(
                     "Temporary Gemini failure. "

@@ -12,11 +12,43 @@ from core.schemas import ActionResult
 from storage.database import initialize_database
 
 
+class _UnicodeSafeWriter:
+    """Escape unsupported characters when a redirected stream cannot be reconfigured."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            self._stream.write(text)
+        except UnicodeEncodeError:
+            encoding = self._stream.encoding
+            escaped = text.encode(encoding, errors="backslashreplace").decode(encoding)
+            self._stream.write(escaped)
+        return len(text)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def _configure_voice_output():
-    """Hindi output must also work when Windows redirects the terminal streams."""
-    for stream in (sys.stdout, sys.stderr):
-        if not stream.isatty() and hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8")
+    """Support multilingual redirected output in both text and voice modes."""
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if stream is None or isinstance(stream, _UnicodeSafeWriter):
+            continue
+        isatty = getattr(stream, "isatty", None)
+        if callable(isatty) and isatty():
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+                continue
+            except (OSError, ValueError, TypeError):
+                pass
+        if getattr(stream, "encoding", None):
+            setattr(sys, name, _UnicodeSafeWriter(stream))
 
 
 def confirm_deletion(pending: ActionResult) -> bool:
@@ -106,6 +138,7 @@ def _voice_text(stt):
 
 
 def main(argv=()):
+    _configure_voice_output()
     parser = argparse.ArgumentParser(description="VoiceOS text and reviewed voice commands")
     parser.add_argument("--voice", action="store_true")
     parser.add_argument(
@@ -157,8 +190,6 @@ def main(argv=()):
     args = parser.parse_args(argv)
     if args.speech_only and not args.voice:
         parser.error("--speech-only requires --voice")
-    if args.voice:
-        _configure_voice_output()
     load_dotenv()
     level = os.getenv("VOICEOS_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(

@@ -18,8 +18,8 @@ def _process_safely(operation: Callable[[], ActionResult]) -> ActionResult:
         return ActionResult(
             status="rejected", message="Invalid command or configuration. Please check and retry."
         )
-    except Exception:
-        logger.exception("Command processing failed.")
+    except Exception as error:
+        logger.error("Command processing failed. Error type: %s", type(error).__name__)
         return ActionResult(
             status="error", message="Unable to process your command. Please retry."
         )
