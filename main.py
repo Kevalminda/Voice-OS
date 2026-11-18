@@ -1,7 +1,9 @@
 import argparse
+import json
 import logging
 import os
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -9,6 +11,8 @@ from core.command_processor import process_text_command as process_text_command
 from core.confirmation import ConfirmationOutcome, ConfirmationSession
 from core.dialogue import DialogueSession
 from core.schemas import ActionResult
+from core.timing import InteractionTiming, current_timing
+from core.voice_confirmation import VoiceConfirmationReader
 from storage.database import initialize_database
 
 
@@ -55,21 +59,41 @@ def confirm_deletion(pending: ActionResult) -> bool:
     return _confirm_deletion(pending)
 
 
-def _confirm_deletion(pending: ActionResult, response_reader=None) -> bool:
+def _confirm_deletion(pending: ActionResult, response_reader=None, *, timing=None) -> bool:
+    timing = timing if timing is not None else current_timing.get()
+    if timing is None:
+        clock = (
+            response_reader.measurement_clock
+            if isinstance(response_reader, VoiceConfirmationReader) else time.perf_counter
+        )
+        timing = InteractionTiming(clock=clock)
+    if isinstance(response_reader, VoiceConfirmationReader):
+        response_reader.timing = timing
+    with timing.measure("confirmation_total_duration"):
+        return _read_deletion_confirmation(pending, response_reader, timing)
+
+
+def _read_deletion_confirmation(pending, response_reader, timing):
     confirmation = ConfirmationSession()
+    timing.record["confirmation_outcome"] = "cancelled"
     try:
         token = confirmation.begin(pending)
         print(f"VoiceOS: {pending.message}")
         while confirmation.has_pending:
-            if confirmation.check_pending(pending) is not None:
+            invalid = confirmation.check_pending(pending)
+            if invalid is not None:
+                timing.record["confirmation_outcome"] = invalid.outcome.value
                 return False
-            reply = (
-                input(f"Approve with yes {token}; or no/cancel/edit: ")
-                if response_reader is None else response_reader(confirmation, pending, token)
-            )
+            timing.record["confirmation_attempt_count"] += 1
+            if response_reader is None:
+                with timing.measure("keyboard_fallback_duration"):
+                    reply = input(f"Approve with yes {token}; or no/cancel/edit: ")
+            else:
+                reply = response_reader(confirmation, pending, token)
             if reply is None:
                 return False
             result = confirmation.respond(reply, pending)
+            timing.record["confirmation_outcome"] = result.outcome.value
             if result.outcome is ConfirmationOutcome.APPROVED:
                 return True
             if result.outcome is ConfirmationOutcome.INVALID and confirmation.has_pending:
@@ -87,17 +111,25 @@ def _confirm_deletion(pending: ActionResult, response_reader=None) -> bool:
                 print(f"VoiceOS: Confirmation {result.outcome.value}.")
             return False
         return False
+    except (KeyboardInterrupt, EOFError):
+        timing.record["confirmation_outcome"] = "interrupted"
+        raise
+    except BaseException:
+        timing.record["confirmation_outcome"] = "error"
+        raise
     finally:
         confirmation.cancel()
 
 
-def _voice_text(stt):
+def _voice_text(stt, *, timing=None):
     """Review recognized text before submitting it to the same text-command boundary."""
     from audio.speech_to_text import SpeechToTextError
 
     trigger = input("Press Enter to record, or type exit: ").strip()
     if trigger.lower() == "exit":
         return "exit"
+    timing = timing if timing is not None else InteractionTiming()
+    timing.resume()
 
     def ready():
         if stt.config.recording_mode == "automatic":
@@ -109,10 +141,17 @@ def _voice_text(stt):
     try:
         transcript = stt.listen_and_transcribe(on_recording_started=ready)
     except (SpeechToTextError, ValueError) as error:
+        for field in (
+            "command_capture_duration", "transcription_duration", "normalization_duration",
+        ):
+            timing.add(field, None)
         print(f"VoiceOS: {error}")
         if getattr(stt, "last_capture_files", None):
             print(f"Saved recording: {stt.last_capture_files['metadata']}")
         return ""
+    timing.add("command_capture_duration", transcript.get("recording_time"))
+    timing.add("transcription_duration", transcript.get("transcription_duration"))
+    timing.add("normalization_duration", transcript.get("normalization_duration"))
     if transcript.get("recording_files"):
         print(f"Saved recording: {transcript['recording_files']['metadata']}")
     if transcript["empty_transcription"] or not transcript.get("has_lexical_content", True):
@@ -131,13 +170,29 @@ def _voice_text(stt):
     ):
         print("VoiceOS: Please re-record with more time and a silent pause at the end.")
         return ""
-    choice = input("Use this command? (yes/no/edit): ").strip().lower()
-    if choice == "edit":
-        return input("Corrected command: ").strip()
+    with timing.measure("transcript_review_duration"):
+        choice = input("Use this command? (yes/no/edit): ").strip().lower()
+        if choice == "edit":
+            return input("Corrected command: ").strip()
     return transcript["normalized_text"] if choice in {"yes", "y"} else ""
 
 
-def main(argv=()):
+def _publish_timing(timing, records, *, finish=True):
+    if not timing.started or timing.published:
+        return
+    if finish:
+        timing.finish()
+    record = timing.snapshot()
+    timing.published = True
+    try:
+        if records is not None:
+            records.append(record)
+        logging.getLogger(__name__).debug("Interaction timing: %s", json.dumps(record))
+    except Exception:
+        pass
+
+
+def main(argv=(), *, measurement_clock=time.perf_counter, timing_records=None):
     _configure_voice_output()
     parser = argparse.ArgumentParser(description="VoiceOS text and reviewed voice commands")
     parser.add_argument("--voice", action="store_true")
@@ -199,6 +254,7 @@ def main(argv=()):
     for name in ("google", "httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
     dialogue = None
+    active_timing = None
     confirmation_callback = confirm_deletion
     try:
         stt = None
@@ -254,17 +310,23 @@ def main(argv=()):
             print("Speech-only mode: all application actions are disabled; no Gemini calls.")
         else:
             initialize_database()
-            dialogue = DialogueSession()
-            if stt is not None:
-                from core.voice_confirmation import VoiceConfirmationReader
+            dialogue = DialogueSession(measurement_clock=measurement_clock)
 
-                response_reader = VoiceConfirmationReader(stt)
+            if stt is not None:
+                response_reader = VoiceConfirmationReader(stt, measurement_clock=measurement_clock)
 
                 def confirmation_callback(pending):
-                    return _confirm_deletion(pending, response_reader)
+                    return _confirm_deletion(pending, response_reader, timing=dialogue.timing)
         print("Welcome to VoiceOS. Type 'exit' to close.")
         while True:
-            text = _voice_text(stt) if stt is not None else input("You: ").strip()
+            active_timing = (
+                dialogue.prepare_turn() if dialogue is not None
+                else InteractionTiming(clock=measurement_clock)
+            )
+            text = (
+                _voice_text(stt, timing=active_timing) if stt is not None
+                else input("You: ").strip()
+            )
             if text.lower() == "exit":
                 break
             if not text:
@@ -276,6 +338,10 @@ def main(argv=()):
                         print(f"VoiceOS: {result.message} [{result.status}]")
                     else:
                         print("Please enter a command.")
+                if dialogue is not None and dialogue.has_pending:
+                    active_timing.wait_for_reply()
+                else:
+                    _publish_timing(active_timing, timing_records)
                 continue
             result = (
                 ActionResult(
@@ -286,6 +352,13 @@ def main(argv=()):
                 else dialogue.process_text_command(text, confirm_action=confirmation_callback)
             )
             print(f"VoiceOS: {result.message} [{result.status}]")
+            if dialogue is not None and active_timing is not dialogue.timing:
+                _publish_timing(active_timing, timing_records, finish=False)
+                active_timing = dialogue.timing
+            if dialogue is None or not dialogue.has_pending:
+                _publish_timing(active_timing, timing_records)
+            else:
+                active_timing.wait_for_reply(displayed=True)
     except (EOFError, KeyboardInterrupt):
         pass
     except Exception:
@@ -294,8 +367,13 @@ def main(argv=()):
         )
     finally:
         if dialogue is not None:
+            if active_timing is not None and active_timing is not dialogue.timing:
+                _publish_timing(active_timing, timing_records, finish=False)
+                active_timing = dialogue.timing
             dialogue.cancel()
         print("VoiceOS shutting down.")
+        if active_timing is not None:
+            _publish_timing(active_timing, timing_records)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from core import command_processor
 from core.schemas import ActionResult, CommandRequest, Intent
+from core.timing import InteractionTiming
 from core.validation import CONFIDENCE_THRESHOLD, REQUIRED_FIELDS, validate_command
 
 _SUPPORTED_INTENTS = {Intent.CREATE_NOTE, Intent.GET_NOTES, Intent.UPDATE_NOTE, Intent.DELETE_NOTE}
@@ -61,6 +62,7 @@ class DialogueSession:
         max_retries: int = 3,
         timeout_seconds: float = 120.0,
         clock: Callable[[], float] = time.monotonic,
+        measurement_clock: Callable[[], float] = time.perf_counter,
     ):
         if type(max_retries) is not int or max_retries < 1:
             raise ValueError("max_retries must be a positive integer.")
@@ -76,6 +78,18 @@ class DialogueSession:
         self._timeout = timeout_seconds
         self._clock = clock
         self._pending: _PendingClarification | None = None
+        self._measurement_clock = measurement_clock
+        self.timing = InteractionTiming(clock=measurement_clock)
+        self._last_timing = None
+
+    @property
+    def last_timing(self):
+        return self._last_timing.snapshot() if self._last_timing is not None else None
+
+    def prepare_turn(self):
+        if self.timing.finished:
+            self.timing = InteractionTiming(clock=self._measurement_clock)
+        return self.timing
 
     @property
     def has_pending(self) -> bool:
@@ -95,6 +109,9 @@ class DialogueSession:
 
     def cancel(self) -> ActionResult:
         self._pending = None
+        if self.timing.started and not self.timing.finished:
+            self.timing.finish()
+            self._last_timing = self.timing
         return ActionResult(status="rejected", message="Clarification cancelled. No action taken.")
 
     def process_text_command(
@@ -102,15 +119,23 @@ class DialogueSession:
         user_text: str,
         confirm_action: Callable[[ActionResult], bool] | None = None,
     ) -> ActionResult:
+        self.prepare_turn().resume()
         try:
             result = command_processor._process_safely(
                 lambda: self._process_turn(user_text, confirm_action)
             )
         except BaseException:
             self._pending = None
+            self.timing.finish()
+            self._last_timing = self.timing
             raise
         if result.status != "needs_clarification":
             self._pending = None
+        if self._pending is not None:
+            self.timing.wait_for_reply()
+        else:
+            self.timing.finish()
+            self._last_timing = self.timing
         return result
 
     def _process_turn(self, user_text, confirm_action):
@@ -123,6 +148,11 @@ class DialogueSession:
             return self.cancel()
         parts = text.split(maxsplit=1)
         if parts and parts[0].casefold() == "/new":
+            if self._pending is not None:
+                self.timing.finish()
+                self._last_timing = self.timing
+                self.timing = InteractionTiming(clock=self._measurement_clock)
+                self.timing.resume()
             self._pending = None
             if len(parts) != 2:
                 return self._restate("Provide a complete command after /new.")
@@ -131,13 +161,13 @@ class DialogueSession:
             return self._collect(text, confirm_action)
         if not text:
             return self._restate("The command cannot be empty.")
-        command = command_processor.understand_command(text)
+        command = command_processor._understand_command(text, self.timing)
         command = CommandRequest.model_validate(command.model_dump())
         validation = validate_command(command)
         if command.intent not in _SUPPORTED_INTENTS:
             return self._restate("This command is not supported.")
         if validation.status == "success":
-            return command_processor.route_command(command, confirm_action=confirm_action)
+            return command_processor._route_command(command, confirm_action, self.timing)
         fields = self._identified_fields(command, validation)
         if not fields:
             return self._unidentified(validation)
@@ -201,7 +231,7 @@ class DialogueSession:
         if validation.status == "success":
             # Consume before entering the router or its synchronous deletion callback.
             self._pending = None
-            return command_processor.route_command(command, confirm_action=confirm_action)
+            return command_processor._route_command(command, confirm_action, self.timing)
         fields = self._identified_fields(command, validation)
         if not fields:
             return self._unidentified(validation)

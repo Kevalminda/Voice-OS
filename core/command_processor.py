@@ -1,8 +1,10 @@
 import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 
 from core.action_router import route_command
 from core.schemas import ActionResult
+from core.timing import InteractionTiming
 from nlu.service import understand_command
 
 logger = logging.getLogger(__name__)
@@ -28,7 +30,29 @@ def _process_safely(operation: Callable[[], ActionResult]) -> ActionResult:
 def process_text_command(
     user_text: str,
     confirm_action: Callable[[ActionResult], bool] | None = None,
+    *,
+    timing: InteractionTiming | None = None,
 ) -> ActionResult:
     return _process_safely(
-        lambda: route_command(understand_command(user_text), confirm_action=confirm_action)
+        lambda: _route_command(_understand_command(user_text, timing), confirm_action, timing)
     )
+
+
+def _understand_command(user_text, timing=None):
+    with timing.measure("nlu_duration") if timing is not None else nullcontext():
+        return understand_command(user_text)
+
+
+def _route_command(command, confirm_action=None, timing=None):
+    callback = confirm_action
+    if timing is not None and confirm_action is not None:
+        def callback(pending):
+            with timing.measure("confirmation_total_duration"):
+                return confirm_action(pending)
+
+    measurement = (
+        timing.measure("action_execution_duration", exclude="confirmation_total_duration")
+        if timing is not None else nullcontext()
+    )
+    with measurement:
+        return route_command(command, confirm_action=callback)

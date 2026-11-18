@@ -3,6 +3,9 @@
 import copy
 import math
 import secrets
+import time
+
+from core.timing import InteractionTiming
 
 _CANCEL = {"cancel", "/cancel", "रद्द करो", "cancel karo", "exit"}
 _REJECT = {"no", "n", "नहीं", "ना", "nahi", "nahin"}
@@ -18,29 +21,40 @@ class VoiceConfirmationReader:
     capture is never transcribed or authorized. No STT configuration is changed.
     """
 
-    def __init__(self, stt, *, read_input=None, write=None):
+    def __init__(self, stt, *, read_input=None, write=None, measurement_clock=time.perf_counter):
         self.stt = stt
         self._input = read_input or input
         self._write = write or print
         self.last_transcript = None
         self.last_capture_files = None
+        self.measurement_clock = measurement_clock
+        self.timing = InteractionTiming(clock=measurement_clock)
 
     def _current(self, confirmation, pending, token):
         invalid = confirmation.check_pending(pending)
         if invalid is not None:
+            self.timing.record["confirmation_outcome"] = invalid.outcome.value
             self._write(f"VoiceOS: Confirmation {invalid.outcome.value}; no reply accepted.")
             return False
         # A replaced request must not receive an earlier in-flight recording,
         # even if both deletions have identical note metadata.
         if not secrets.compare_digest(confirmation.token, token):
+            self.timing.record["confirmation_outcome"] = "invalid"
             confirmation.cancel()
             self._write("VoiceOS: Confirmation changed; the previous reply was discarded.")
             return False
         return True
 
     def __call__(self, confirmation, pending, token):
+        managed = self.timing.is_measuring("confirmation_total_duration")
+        with self.timing.measure("confirmation_total_duration"):
+            return self._read_response(confirmation, pending, token, managed)
+
+    def _read_response(self, confirmation, pending, token, managed):
         if not self._current(confirmation, pending, token):
             return None
+        if not managed:
+            self.timing.record["confirmation_attempt_count"] += 1
         choice = self._input(
             f"Press Enter to speak confirmation for token {token}; or keyboard/cancel/edit: "
         )
@@ -93,9 +107,10 @@ class VoiceConfirmationReader:
         if not self._usable(result):
             self._write("Unusable or uncertain confirmation. Retry or choose keyboard.")
             return ""
-        review = self._input(
-            "Is this your intended spoken response, exactly? (yes/no/keyboard/cancel/edit): "
-        )
+        with self.timing.measure("confirmation_review_duration"):
+            review = self._input(
+                "Is this your intended spoken response, exactly? (yes/no/keyboard/cancel/edit): "
+            )
         if not self._current(confirmation, pending, token):
             return None
         review = " ".join(review.casefold().split())
@@ -114,7 +129,8 @@ class VoiceConfirmationReader:
     def _keyboard(self, confirmation, pending, token):
         if not self._current(confirmation, pending, token):
             return None
-        reply = self._input(f"Approve with yes {token}; or no/cancel/edit: ")
+        with self.timing.measure("keyboard_fallback_duration"):
+            reply = self._input(f"Approve with yes {token}; or no/cancel/edit: ")
         return reply if self._current(confirmation, pending, token) else None
 
     def _capture(self, confirmation, pending, token):
@@ -128,9 +144,16 @@ class VoiceConfirmationReader:
         self.last_transcript = None
         self.last_capture_files = None
         self.stt.last_capture_files = None
-        audio = self.stt.record_audio(
-            on_started=lambda: self._write("Listening for confirmation. Speak, then leave silence.")
-        )
+        capture_started = self.timing.now()
+        try:
+            audio = self.stt.record_audio(
+                on_started=lambda: self._write(
+                    "Listening for confirmation. Speak, then leave silence."
+                )
+            )
+        finally:
+            capture_duration = self.timing.elapsed(capture_started)
+            self.timing.add("confirmation_capture_duration", capture_duration)
         current = self._current(confirmation, pending, token)
         info = copy.deepcopy(self.stt.last_recording_info or {})
         files = None
@@ -150,9 +173,10 @@ class VoiceConfirmationReader:
                 finish_capture(files, None)
             raise ValueError("The confirmation recording did not complete safely.")
         try:
-            result = self.stt.transcribe(audio, recording_info=info)
-            if not isinstance(result, dict):
-                raise ValueError("STT did not return transcript metadata.")
+            with self.timing.measure("confirmation_transcription_duration"):
+                result = self.stt.transcribe(audio, recording_info=info)
+                if not isinstance(result, dict):
+                    raise ValueError("STT did not return transcript metadata.")
         except BaseException:
             if files:
                 try:
@@ -160,6 +184,9 @@ class VoiceConfirmationReader:
                 except OSError:
                     self._write("Confirmation audio saved; failure metadata could not be updated.")
             raise
+        result = result.copy()
+        result["recording_time"] = capture_duration
+        result["total_duration"] = self.timing.elapsed(capture_started)
         self.last_transcript = copy.deepcopy(result)
         current = self._current(confirmation, pending, token)
         if files:

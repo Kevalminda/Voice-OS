@@ -159,7 +159,13 @@ def test_normalized_text_cannot_repair_raw_token(setup, isolated_database, exist
 
     assert run_delete(existing_note, reader).status == "rejected"
     assert isolated_database.read_bytes() == before
-    assert reader.last_transcript == result
+    assert reader.last_transcript == {
+        **result,
+        "recording_time": reader.last_transcript["recording_time"],
+        "total_duration": reader.last_transcript["total_duration"],
+    }
+    assert reader.last_transcript["recording_time"] >= 0
+    assert reader.last_transcript["total_duration"] >= reader.last_transcript["recording_time"]
 
 
 @pytest.mark.parametrize(
@@ -208,7 +214,13 @@ def test_unusable_transcripts_never_reach_approval(
 
     assert run_delete(existing_note, reader).status == "rejected"
     assert isolated_database.read_bytes() == before
-    assert reader.last_transcript == result
+    assert reader.last_transcript == {
+        **result,
+        "recording_time": reader.last_transcript["recording_time"],
+        "total_duration": reader.last_transcript["total_duration"],
+    }
+    assert reader.last_transcript["recording_time"] >= 0
+    assert reader.last_transcript["total_duration"] >= reader.last_transcript["recording_time"]
 
 
 def test_failed_capture_offers_keyboard_fallback_without_new_deadline(setup, existing_note):
